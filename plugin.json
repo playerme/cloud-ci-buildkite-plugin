@@ -1,0 +1,7 @@
+{
+  "name": "cloudci",
+  "description": "Runs your build steps using CloudCI",
+  "author": "maso@splitmedialabs.com",
+  "public": false,
+  "requirements": ["docker"]
+}

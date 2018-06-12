@@ -1,0 +1,123 @@
+#!/bin/bash
+
+set -o errexit
+set -o pipefail
+set -o nounset
+
+if [[ "${BUILDKITE_PLUGIN_CLOUD_CI_DEBUG:-false}" =~ (true|on|1) ]] ; then
+  set -o xtrace
+fi
+
+if [[ -z "${BUILDKITE_PLUGIN_CLOUD_CI_ENTRYPOINT:-}" ]] ; then
+  BUILDKITE_PLUGIN_CLOUD_CI_ENTRYPOINT="cloud-ci"
+fi
+
+if [[ -z "${BUILDKITE_PLUGIN_CLOUD_CI_IMAGE:-}" ]] ; then
+  BUILDKITE_PLUGIN_CLOUD_CI_IMAGE="gcr.io/sml-ops/cloud-ci"
+fi
+
+if [[ -z "${BUILDKITE_PLUGIN_CLOUD_CI_TAG:-}" ]] ; then
+  BUILDKITE_PLUGIN_CLOUD_CI_TAG="latest"
+fi
+
+if [[ -z "${BUILDKITE_PLUGIN_CLOUD_CI_HOOKS_DIRECTORY:-}" ]] ; then
+  BUILDKITE_PLUGIN_CLOUD_CI_HOOKS_DIRECTORY=""
+fi
+
+
+
+args=(
+  "-it"
+  "--rm"
+  "--env" "BUILDKITE_BRANCH"
+  "--env" "BUILDKITE_COMMIT"
+  "--env" "BUILDKITE_REPO"
+  "--volume" "$PWD:/workspace"
+  "--workdir" "/workspace"
+)
+
+if [[ "${BUILDKITE_PLUGIN_CLOUD_CI_MOUNT_SSH:-true}" =~ (true|on|1) ]] ; then
+  args+=(
+    "--volume" "/root/.ssh:/root/.ssh:ro"
+  )
+fi
+
+if [[ "${BUILDKITE_PLUGIN_CLOUD_CI_MOUNT_SECRETS:-true}" =~ (true|on|1) ]] ; then
+  args+=(
+    "--volume" "/buildkite-secrets:/buildkite-secrets:ro"
+  )
+fi
+
+if [[ "${BUILDKITE_PLUGIN_CLOUD_CI_MOUNT_DOCKER:-true}" =~ (true|on|1) ]] ; then
+  args+=(
+    "--volume" "/root/.docker:/root/.docker:ro"
+    "--volume" "/var/run/docker.sock:/var/run/docker.sock:ro"
+  )
+fi
+
+# Handle the mount-buildkite-agent option
+if [[ "${BUILDKITE_PLUGIN_CLOUD_CI_MOUNT_BUILDKITE_AGENT:-true}" =~ (true|on|1) ]] ; then
+  args+=(
+    "--env" "BUILDKITE_JOB_ID"
+    "--env" "BUILDKITE_BUILD_ID"
+    "--env" "BUILDKITE_AGENT_ACCESS_TOKEN"
+    "--volume" "$(which buildkite-agent):/usr/bin/buildkite-agent:ro"
+  )
+fi
+
+# Handle any extra environment variables
+while IFS='=' read -r name _ ; do
+  if [[ $name =~ ^(BUILDKITE_PLUGIN_CLOUD_CI_ENVIRONMENT_[0-9]+) ]] ; then
+    args+=( "--env" "${!name}" )
+  fi
+done < <(env | sort)
+
+# Handle extra volumes
+while IFS='=' read -r name _ ; do
+  if [[ $name =~ ^(BUILDKITE_PLUGIN_CLOUD_CI_MOUNTS_[0-9]+) ]] ; then
+    args+=( "--volume" "${!name}" )
+  fi
+done < <(env | sort)
+
+if [[ "${BUILDKITE_PLUGIN_CLOUD_CI_ALWAYS_PULL:-false}" =~ (true|on|1) ]] ; then
+  echo "--- :docker: Pulling ${BUILDKITE_PLUGIN_CLOUD_CI_IMAGE}:${BUILDKITE_PLUGIN_CLOUD_CI_TAG}"
+  echo docker pull "${BUILDKITE_PLUGIN_CLOUD_CI_IMAGE}":"${BUILDKITE_PLUGIN_CLOUD_CI_TAG}"
+fi
+
+
+if [[ "${BUILDKITE_PLUGIN_CLOUD_CI_RAW_COMMAND:-false}" =~ (true|on|1) ]] ; then
+  echo "--- :docker: Running ${BUILDKITE_COMMAND} in ${BUILDKITE_PLUGIN_CLOUD_CI_IMAGE}"
+  docker run "${args[@]}" "${BUILDKITE_PLUGIN_CLOUD_CI_IMAGE}":"${BUILDKITE_PLUGIN_CLOUD_CI_TAG}" $(echo $BUILDKITE_PLUGIN_CLOUD_CI_ENTRYPOINT) "${BUILDKITE_COMMAND}"
+else
+  # create the entrypoint file
+  cat > $PWD/$BUILDKITE_BUILD_ID <<EOF
+#!/bin/bash
+
+set -o errexit
+set -o pipefail
+set -o nounset
+EOF
+
+  if [[ -n "${BUILDKITE_PLUGIN_CLOUD_CI_HOOKS_DIRECTORY}" ]] ; then
+    if [[ -e $PWD/.buildkite/$BUILDKITE_PLUGIN_CLOUD_CI_HOOKS_DIRECTORY/pre-command ]] ; then
+      echo "echo \"--- :docker: :house_with_garden: Running pre-command hook\"" >> $PWD/$BUILDKITE_BUILD_ID
+      echo "./.buildkite/$BUILDKITE_PLUGIN_CLOUD_CI_HOOKS_DIRECTORY/pre-command" >> $PWD/$BUILDKITE_BUILD_ID
+    fi
+  fi
+
+  # the actual command
+  echo "echo \"--- :docker: Running ${BUILDKITE_COMMAND} in ${BUILDKITE_PLUGIN_CLOUD_CI_IMAGE}\"" >> $PWD/$BUILDKITE_BUILD_ID
+  echo $(echo $BUILDKITE_PLUGIN_CLOUD_CI_ENTRYPOINT) "${BUILDKITE_COMMAND}" >> $PWD/$BUILDKITE_BUILD_ID
+
+  if [[ -n "${BUILDKITE_PLUGIN_CLOUD_CI_HOOKS_DIRECTORY}" ]] ; then
+    if [[ -e $PWD/.buildkite/$BUILDKITE_PLUGIN_CLOUD_CI_HOOKS_DIRECTORY/post-command ]] ; then
+      echo "echo \"--- :docker: :house_with_garden: Running post-command hook\"" >> $PWD/$BUILDKITE_BUILD_ID
+      echo "./.buildkite/$BUILDKITE_PLUGIN_CLOUD_CI_HOOKS_DIRECTORY/post-command" >> $PWD/$BUILDKITE_BUILD_ID
+    fi
+  fi
+
+  # make it executable
+  chmod +x $PWD/$BUILDKITE_BUILD_ID
+
+  docker run "${args[@]}" "${BUILDKITE_PLUGIN_CLOUD_CI_IMAGE}":"${BUILDKITE_PLUGIN_CLOUD_CI_TAG}" ./$BUILDKITE_BUILD_ID
+fi
